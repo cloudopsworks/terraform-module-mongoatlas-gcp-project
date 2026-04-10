@@ -1,12 +1,12 @@
-name: Terraform Transit Gateway Module
+name: Terraform MongoDB Atlas GCP Project Module
 #logo: logo/logo.jpg
 badges:
   - name: Latest Release
-    image: https://img.shields.io/github/release/<owner/repo>.svg?style=for-the-badge
-    url: https://github.com/<owner/repo>/releases/latest
+    image: https://img.shields.io/github/release/cloudopsworks/terraform-module-mongoatlas-gcp-project.svg?style=for-the-badge
+    url: https://github.com/cloudopsworks/terraform-module-mongoatlas-gcp-project/releases/latest
   - name: Last Updated
-    image: https://img.shields.io/github/last-commit/<owner/repo>.svg?style=for-the-badge
-    url: https://github.com/<owner/repo>/commits
+    image: https://img.shields.io/github/last-commit/cloudopsworks/terraform-module-mongoatlas-gcp-project.svg?style=for-the-badge
+    url: https://github.com/cloudopsworks/terraform-module-mongoatlas-gcp-project/commits
 
 license: "APACHE2"
 
@@ -15,23 +15,264 @@ copyrights:
     url: "https://cloudopsworks.co"
     year: "2026"
 
-github_repo: <owner/repo>
+github_repo: cloudopsworks/terraform-module-mongoatlas-gcp-project
 
 description: |-
-  <description>
+  Terraform module that provisions a MongoDB Atlas Project on Google Cloud Platform (GCP), with optional GCP Cloud KMS
+  encryption-at-rest integration. The module follows the CloudOpsWorks hub-spoke architecture, auto-generates
+  resource names from organizational naming conventions, and delegates project-level configuration (alerts, backup
+  compliance, maintenance windows, IP access lists) to the underlying
+  `cloudopsworks/terraform-module-mongoatlas-project` sub-module.
 
 # Introduction to the project
 introduction: |-
-#  This is an introduction.
+  ## Overview
+
+  This module creates and manages a **MongoDB Atlas Project** using GCP as the cloud provider.
+  It integrates with the CloudOpsWorks organizational hierarchy (org unit, environment type, environment name,
+  and spoke) to produce consistent, deterministic resource names across all deployments.
+
+  ### Key capabilities
+
+  | Feature | Description |
+  |---|---|
+  | **Project provisioning** | Creates and configures a MongoDB Atlas project within a target Atlas organization |
+  | **GCP KMS encryption at rest** | Optionally creates a GCP KMS key ring and crypto key, and wires them to the Atlas encryption-at-rest provider |
+  | **Naming conventions** | Auto-derives project names from org/env/spoke/region — no manual naming required |
+  | **Hub-spoke support** | Designed for multi-environment deployments; `is_hub` and `spoke_def` control the topology |
+  | **Import blocks** | Optional OpenTofu import block generation for brown-field adoption of existing Atlas projects |
+  | **Alert & backup compliance** | Delegates alert policies, backup compliance, maintenance windows, and IP access lists to the sub-module |
+
+  ### Architecture
+
+  ```
+  ┌───────────────────────────────────────────────────────────────┐
+  │  terraform-module-mongoatlas-gcp-project (this module)        │
+  │                                                               │
+  │  ┌────────────────────────────────────────────────────────┐   │
+  │  │  google_kms_key_ring       (conditional)               │   │
+  │  │  google_kms_crypto_key     (conditional)               │   │
+  │  │  google_kms_crypto_key_iam_member (conditional)        │   │
+  │  └────────────────────────────────────────────────────────┘   │
+  │                        │                                      │
+  │                        ▼                                      │
+  │  ┌────────────────────────────────────────────────────────┐   │
+  │  │  module "project"                                      │   │
+  │  │  (cloudopsworks/terraform-module-mongoatlas-project)   │   │
+  │  │                                                        │   │
+  │  │  • mongodbatlas_project                                │   │
+  │  │  • mongodbatlas_cloud_provider_access_setup (GCP)      │   │
+  │  │  • mongodbatlas_encryption_at_rest                     │   │
+  │  │  • mongodbatlas_alert_configuration                    │   │
+  │  │  • mongodbatlas_backup_compliance_policy               │   │
+  │  │  • mongodbatlas_maintenance_window                     │   │
+  │  │  • mongodbatlas_project_ip_access_list                 │   │
+  │  └────────────────────────────────────────────────────────┘   │
+  └───────────────────────────────────────────────────────────────┘
+  ```
+
+  ### Naming convention
+
+  Resource names are derived from the organizational context:
+
+  | Token | Source |
+  |---|---|
+  | `org_unit` | `var.org.organization_unit` |
+  | `env_name` | `var.org.environment_name` |
+  | `env_type` | `var.org.environment_type` |
+  | `spoke` | `var.spoke_def` |
+  | `region` | GCP provider region (abbreviated) |
+
+  The resulting `system_name_plain` is `{org_unit}-{env_name}-{env_type}-{region}` and is used as the default
+  Atlas project name unless `var.name` or `var.name_prefix` override it.
+
+  ### GCP KMS encryption at rest
+
+  When `settings.encryption_at_rest.enabled = true`:
+
+  1. A GCP KMS **key ring** is created (name: `mongodbatlas-{system_name}-keyring`).
+  2. A **crypto key** is created inside the ring with `ENCRYPT_DECRYPT` purpose and configurable rotation period.
+  3. The Atlas-generated GCP **service account** (from cloud provider access setup) is granted the
+     `roles/cloudkms.cryptoKeyEncrypterDecrypter` IAM role on the key.
+  4. The current key version resource ID is passed to the Atlas encryption-at-rest provider config.
+
+  > **Important**: The crypto key has `prevent_destroy = true` to protect against accidental key deletion,
+  > which would permanently lock encrypted MongoDB data.
 
 # How to use this project
 usage: |-
+  ## Terragrunt usage
+
+  The following example shows a typical `terragrunt.hcl` deployment using the `.boilerplate/inputs.yaml`
+  configuration file loaded by the Terragrunt hierarchy.
+
+  ```hcl
+  # terragrunt.hcl (generated by boilerplate)
+  terraform {
+    source = "git::https://github.com/cloudopsworks/terraform-module-mongoatlas-gcp-project.git?ref=v1.0.0"
+  }
+
+  locals {
+    local_vars = yamldecode(file("${get_terragrunt_dir()}/inputs.yaml"))
+  }
+
+  inputs = {
+    # -- Supplied by the Terragrunt hierarchy (do NOT set in inputs.yaml) --
+    is_hub     = local.is_hub
+    spoke_def  = local.spoke_def
+    org        = local.org
+    extra_tags = local.extra_tags
+
+    # -- Module-specific inputs (set in inputs.yaml) --
+    name_prefix       = local.local_vars.name_prefix
+    name              = local.local_vars.name
+    organization_name = local.local_vars.organization_name
+    organization_id   = local.local_vars.organization_id
+    settings          = local.local_vars.settings
+    generate_import   = local.local_vars.generate_import
+  }
+  ```
+
+  ### Minimal deployment (no encryption)
+
+  `inputs.yaml`:
+  ```yaml
+  organization_name: "my-atlas-org"
+
+  settings:
+    default_alerts_settings: true
+    collect_database_specifics_statistics_enabled: true
+    data_explorer_enabled: true
+    performance_advisor_enabled: true
+    schema_advisor_enabled: true
+    encryption_at_rest:
+      enabled: false
+  ```
+
+  ### Deployment with GCP KMS encryption at rest
+
+  `inputs.yaml`:
+  ```yaml
+  organization_name: "my-atlas-org"
+
+  settings:
+    default_alerts_settings: true
+    collect_database_specifics_statistics_enabled: true
+    data_explorer_enabled: true
+    performance_advisor_enabled: true
+    schema_advisor_enabled: true
+    encryption_at_rest:
+      enabled: true
+      kms_location: "us-central1"      # defaults to GCP provider region if omitted
+      rotation_period: "7776000s"      # 90 days
+  ```
+
+  ### Deployment with explicit project name and import block generation
+
+  `inputs.yaml`:
+  ```yaml
+  name: "my-custom-atlas-project"
+  organization_id: "64b1a2c3d4e5f60012345678"
+
+  generate_import: true
+
+  settings:
+    default_alerts_settings: true
+    encryption_at_rest:
+      enabled: false
+  ```
 
 # Example usage
 examples: |-
+  ## Full settings example
+
+  The following `inputs.yaml` demonstrates all available `settings` keys:
+
+  ```yaml
+  name_prefix: "acme"
+  organization_name: "acme-atlas-org"
+
+  generate_import: false
+
+  settings:
+    # Project feature flags
+    default_alerts_settings: true                           # (Optional) Enable default Atlas alert policies. Default: true.
+    collect_database_specifics_statistics_enabled: true     # (Optional) Collect DB-specific stats. Default: true.
+    data_explorer_enabled: true                             # (Optional) Enable Data Explorer UI. Default: true.
+    extended_storage_sizes_enabled: false                   # (Optional) Allow extended storage sizes. Default: false.
+    performance_advisor_enabled: true                       # (Optional) Enable Performance Advisor. Default: true.
+    schema_advisor_enabled: true                            # (Optional) Enable Schema Advisor. Default: true.
+
+    # Backup compliance policy (see Atlas provider docs for full schema)
+    backup_compliance:
+      authorized_email: "dba@acme.com"
+      authorized_user_first_name: "John"
+      authorized_user_last_name: "Doe"
+      copy_protection_enabled: true
+      encryption_at_rest_enabled: true
+      pit_enabled: true
+      restore_window_days: 7
+
+    # Maintenance window
+    maintenance:
+      day_of_week: 7    # Sunday (1=Monday … 7=Sunday)
+      hour_of_day: 3    # 03:00 UTC
+
+    # IP access list entries
+    access_list:
+      - cidr_block: "10.0.0.0/8"
+        comment: "Internal VPC range"
+
+    # Custom alert configurations (Atlas alert shape)
+    alerts: []
+
+    # GCP KMS encryption at rest
+    encryption_at_rest:
+      enabled: true
+      key_ring_name: ""         # (Optional) Defaults to "mongodbatlas-{system_name}-keyring"
+      crypto_key_name: ""       # (Optional) Defaults to "mongodbatlas-{system_name}-key"
+      kms_location: ""          # (Optional) Defaults to GCP provider region
+      rotation_period: "7776000s"  # (Optional) Default: "7776000s" (90 days). Format: "{seconds}s"
+  ```
 
 # How to get started quickly
 quickstart: |-
+  ## Quick start
+
+  1. **Prerequisites**
+     - Terraform >= 1.7 or OpenTofu >= 1.7
+     - GCP project with Cloud KMS API enabled (if using encryption at rest)
+     - MongoDB Atlas API keys with Organization Owner role
+     - Terragrunt installed
+
+  2. **Initialize the module**
+     ```sh
+     make init/gcp
+     ```
+
+  3. **Create your `inputs.yaml`** from the `.boilerplate/inputs.yaml` template:
+     ```sh
+     cp .boilerplate/inputs.yaml ./my-deployment/inputs.yaml
+     ```
+     Edit `my-deployment/inputs.yaml` with your organization name and desired settings.
+
+  4. **Format and validate**
+     ```sh
+     make fmt
+     make lint
+     ```
+
+  5. **Deploy**
+     ```sh
+     cd my-deployment
+     terragrunt init
+     terragrunt plan
+     terragrunt apply
+     ```
+
+  6. **After the first apply** — if encryption at rest is enabled, note the output
+     `project_kms_atlas_service_account`. This is the GCP service account that Atlas uses to
+     access the KMS key. It should already have the required IAM binding applied by this module.
 
 include:
   - "docs/targets.md"
